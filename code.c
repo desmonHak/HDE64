@@ -6,45 +6,44 @@
 
 void print_hde64s(const hde64s* inst);
 
-const char* register_names[] = {
-    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
-    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-    "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi",
-    "ax", "cx", "dx", "bx", "sp", "bp", "si", "di",
-    "al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"
-};
+#include <stdio.h>
 
-const char* get_register_name(uint8_t reg, int is_extended, int size) {
-    if (size == 8) {
-        if (reg < 4) {
-            return register_names[32 + reg];  // al, cl, dl, bl
-        } else {
-            return register_names[36 + (reg - 4)];  // ah, ch, dh, bh
-        }
-    } else if (size == 16) {
-        return register_names[24 + reg];  // ax, cx, dx, bx, etc.
-    } else if (size == 32) {
-        return register_names[16 + reg];  // eax, ecx, edx, ebx, etc.
-    } else {  // 64 bits
-        if (is_extended) {
-            return register_names[reg + 8];
-        } else {
-            return register_names[reg];
-        }
+const char* get_register_name(int reg_index, int rex_flag, int operand_size) {
+    static const char* reg_names_8[]  = { "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b" };
+    static const char* reg_names_16[] = { "ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w" };
+    static const char* reg_names_32[] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d" };
+    static const char* reg_names_64[] = { "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+
+    // Calcula el índice del registro ajustando el bit rex_flag (normalmente utilizado en registros de 64 bits)
+    int reg_final_index = reg_index;
+    if (rex_flag) {
+        reg_final_index += 8;  // Agrega el valor de rex para índices extendidos (r8-r15)
+    }
+
+    switch (operand_size) {
+        case 8:
+            return reg_names_8[reg_final_index];
+        case 16:
+            return reg_names_16[reg_final_index];
+        case 32:
+            return reg_names_32[reg_final_index];
+        case 64:
+            return reg_names_64[reg_final_index];
+        default:
+            return "Unknown";
     }
 }
+
 
 void hde64_to_string(const hde64s* hs, const void* code, char* output, size_t output_size) {
     char temp[64];
     const char* opcode_name = "Unknown";
-    //print_hde64s(hs);
-    int operand_size = 64;  // Por defecto, asumimos operandos de 64 bits
+    print_hde64s(hs);
+    int operand_size = hs->rex_w ? 64 : 32;  // Por defecto, asumimos operandos de 64 bits
     if (hs->p_66) operand_size = 16;
-    else if (!hs->rex_w && !hs->p_67) operand_size = 32;
-    if (hs->p_67) 
-        if (operand_size == 64) operand_size = 32;
-        else if (operand_size == 32) operand_size = 16;
+    else if (hs->p_67) operand_size = (operand_size == 64) ? 32 : 16;
 
+    omit_p67:
 
     // Para instrucciones que operan explícitamente con bytes
     if (hs->opcode >= 0xB0 && hs->opcode <= 0xB7) operand_size = 8;
@@ -58,9 +57,12 @@ void hde64_to_string(const hde64s* hs, const void* code, char* output, size_t ou
             switch (hs->opcode2)
             {
                 case 0x05:          snprintf(output, output_size, "syscall"); return;
+                case 0x31:          snprintf(output, output_size, "rdtsc"); return;
+                case 0xa2:          snprintf(output, output_size, "cpuid"); return;
                 case 0xb0 ... 0xb1: opcode_name = "cmpxchg"; goto exit_switch;
                 case 0xc0 ... 0xc1: opcode_name = "xadd"; goto exit_switch;
                 case 0xc8 ... 0xcf: opcode_name = "bswap"; goto exit_switch;
+                case 0x1f: opcode_name = "nop"; goto exit_switch;
                 default:            
                     snprintf(output, output_size, "Unknown 0x%x 0x%x", hs->opcode, hs->opcode2); return;
             }
@@ -82,6 +84,12 @@ void hde64_to_string(const hde64s* hs, const void* code, char* output, size_t ou
         case 0x88 ... 0x8b: opcode_name = "mov"; goto exit_switch;
         case 0x8c:          opcode_name = "mov sreg"; goto exit_switch;
         case 0x8d:          opcode_name = "lea"; goto exit_switch;
+        case 0x90:
+            if (hs->p_rep) {
+                snprintf(output, output_size, "rep nop"); return;
+            } else {
+                snprintf(output, output_size, "nop"); return;
+            }
         case 0xb0 ... 0xbf: opcode_name = "mov"; goto exit_switch;
         case 0xE8:          opcode_name = "call"; goto exit_switch;
         case 0xE9:          opcode_name = "jmp"; goto exit_switch;       // Añadido para JMP
@@ -99,7 +107,6 @@ void hde64_to_string(const hde64s* hs, const void* code, char* output, size_t ou
             snprintf(output, output_size, "leave"); return;
         case 0xCD: 
             snprintf(output, output_size, "int 0x%x", hs->imm.imm32); return;
-
         case 0xf6:
             opcode_name = "test"; break;
         default:
@@ -352,40 +359,47 @@ void find_call_instructions(const unsigned char* code, size_t size) {
 int main() {
     // Example machine code (x86-64) to disassemble
     unsigned char code[] = {
-        0x8d, 0x80, 0x88, 0x77, 0x22, 0x11,               // lea eax, [rax + 0x11227788]
-        0x0f, 0x05,                                       // syscall
-        0x48, 0x55,                                       // push   rbp
-        0x48, 0x89, 0xe5,                                 // mov    rbp, rsp
-        0x68, 0x44, 0x33, 0x22, 0x11,                     // push   0x11223344
-        0x48, 0x13, 0x43, 0x0a,                           // adc    rax, [rbx + 10]
-        0x48, 0x83, 0xec, 0x10,                           // sub    rsp, 0x10
-        0x83, 0xec, 0x10,                                 // sub    esp, 0x10
-        0xe8, 0x00, 0x00, 0x00, 0x00,                     // call   <function>
-        0xc9,                                             // leave
-        0xc3,                                             // ret
-        0x4c, 0x8b, 0xd1,                                 // mov    r10, rcx
-        0xe9, 0x60, 0x6b, 0x07, 0x00,                     // jmp    0x76b65
-        0xf6, 0x04, 0x25, 0x08, 0x03, 0xfe, 0x7f, 0x01,   // text byte ptr ds:[0x7ffe0308], 1
-        0x75, 0x03,                                       // jmp
-        0x0f, 0x05,                                       // syscall
-        0xc3,                                             // ret
-        0xcd, 0x2e,                                       // int 0x2e
-        0xc3,                                             // ret
+        0x0F, 0x05,                                             // syscall 
+        0xBB, 0x02, 0x00, 0x00, 0x00,                           // mov     ebx, 2 ; corregir
+        0x48, 0xc7, 0xc1, 0x03, 0x00, 0x00, 0x00,               // mov     rcx, 3 ; corregir
+        0xBA, 0x04, 0x00, 0x00, 0x00,                           // mov     edx, 4 ; corregir
+        0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,               // mov     rax, 1
+        0x66, 0x90,                                             // nop 
+        0x0F, 0x1F, 0x00,                                       // nop dword ptr [eax]
+        0x0F, 0x1F, 0x40, 0x00,                                 // nop dword ptr [eax]
+        0x0F, 0x1F, 0x44, 0x00, 0x00,                           // nop dword ptr [eax + eax]
+        0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00,                     // nop word ptr [eax + eax]
+        0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00,               // nop dword ptr [eax]
+        0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,         // nop dword ptr [eax + eax]
+        0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,   // nop word ptr [eax + eax]
+        0xf3, 0x90,                                             // pause
+        0x0f, 0x31,                                             // rdtsc      
+        0x0f, 0xa2 ,                                            // cpuid
+        0x8d, 0x80, 0x88, 0x77, 0x22, 0x11,                     // lea eax, [rax + 0x11227788] ; corregir
+        0x0f, 0x05,                                             // syscall
+        0x48, 0x55,                                             // push   rbp
+        0x48, 0x89, 0xe5,                                       // mov    rbp, rsp
+        0x68, 0x44, 0x33, 0x22, 0x11,                           // push   0x11223344
+        0x48, 0x13, 0x43, 0x0a,                                 // adc    rax, [rbx + 10]
+        0x48, 0x83, 0xec, 0x10,                                 // sub    rsp, 0x10
+        0x83, 0xec, 0x10,                                       // sub    esp, 0x10
+        0xe8, 0x00, 0x00, 0x00, 0x00,                           // call   <function>
+        0xc9,                                                   // leave
+        0xc3,                                                   // ret
+        0x4c, 0x8b, 0xd1,                                       // mov    r10, rcx
+        0xe9, 0x60, 0x6b, 0x07, 0x00,                           // jmp    0x76b65
+        0xf6, 0x04, 0x25, 0x08, 0x03, 0xfe, 0x7f, 0x01,         // text byte ptr ds:[0x7ffe0308], 1
+        0x75, 0x03,                                             // jmp           ; corregir?
+        0x0f, 0x05,                                             // syscall
+        0xc3,                                                   // ret
+        0xcd, 0x2e,                                             // int 0x2e
+        0xc3,                                                   // ret
 
-        0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,         // mov     rax, 1
-        0xBB, 0x02, 0x00, 0x00, 0x00,                     // mov     ebx, 2
-        0x48, 0xc7, 0xc1, 0x03, 0x00, 0x00, 0x00,         // mov     rcx, 3
-        0xBA, 0x04, 0x00, 0x00, 0x00,                     // mov     edx, 4
-        0x0F, 0x05,                                       // syscall 
-        0x8D, 0x04, 0x25, 0x88, 0x77, 0x66, 0x55,         // lea     eax, [0x55667788] 
+        0x8D, 0x04, 0x25, 0x88, 0x77, 0x66, 0x55,               // lea     eax, [0x55667788] 
     };
 
     hde64s hs; // Structure to hold disassembled instruction
     unsigned int len; // Length of the instruction
-
-    analyze_instruction(code);
-    disassemble_function(code, sizeof(code));
-    find_call_instructions(code, sizeof(code));
 
     // Disassemble the code
     const unsigned char *p = code;
@@ -405,6 +419,9 @@ int main() {
         
         p += len; // Move to the next instruction
     }
+    analyze_instruction(code);
+    disassemble_function(code, sizeof(code));
+    find_call_instructions(code, sizeof(code));
 
     return 0;
 }
